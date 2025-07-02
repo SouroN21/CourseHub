@@ -10,6 +10,7 @@ const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const nodemailer = require('nodemailer');
+const Enrollment = require('../models/enrollmentModel');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -65,11 +66,6 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
 
-    // Check if already enrolled
-    if (student.enrolledCourses.includes(id)) {
-      return res.status(400).json({ message: 'Already enrolled in this course' });
-    }
-
     // Find instructor
     const instructor = await User.findOne({ createdCourses: course._id });
     if (!instructor) {
@@ -78,9 +74,6 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
 
     // Free course: Enroll directly
     if (course.price === 0) {
-      student.enrolledCourses.push(course._id);
-      await student.save();
-
       // Send email to student
       await transporter.sendMail({
         from: `"CourseHub" <${process.env.EMAIL_USER}>`,
@@ -94,7 +87,6 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
           <p>Best regards,<br>CourseHub Team</p>
         `,
       });
-
       // Send email to instructor
       await transporter.sendMail({
         from: `"CourseHub" <${process.env.EMAIL_USER}>`,
@@ -107,7 +99,6 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
           <p>Best regards,<br>CourseHub Team</p>
         `,
       });
-
       return res.json({ message: 'Enrolled successfully' });
     }
 
@@ -128,7 +119,7 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
         },
       ],
       mode: 'payment',
-      success_url: `http://localhost:3000/purchase-success?course_id=${course._id}&student_id=${student._id}`,
+      success_url: `http://localhost:3000/purchase-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `http://localhost:3000/courses/${course._id}`,
       metadata: {
         course_id: course._id.toString(),
@@ -145,63 +136,66 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
 
 // POST /api/courses/purchase-success - Confirm purchase and enroll
 router.post('/purchase-success', authMiddleware(['Student']), async (req, res) => {
-  const { course_id, student_id } = req.body;
-
+  const { sessionId } = req.body;
   try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ message: 'Payment not completed.' });
+    }
+    const course_id = session.metadata.course_id;
+    const student_id = session.metadata.student_id;
     if (!mongoose.Types.ObjectId.isValid(course_id) || !mongoose.Types.ObjectId.isValid(student_id)) {
       return res.status(400).json({ message: 'Invalid course or student ID' });
     }
-
     const course = await Course.findById(course_id);
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
     }
-
     const student = await User.findById(student_id);
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
     }
-
     if (req.user.id !== student_id) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
-
-    // Enroll student
-    if (!student.enrolledCourses.includes(course_id)) {
-      student.enrolledCourses.push(course_id);
-      await student.save();
-
-      // Send email to student
+    // Only enroll if not already enrolled
+    await Enrollment.findOneAndUpdate(
+      { student: student_id, course: course_id },
+      {
+        $setOnInsert: { enrolledAt: new Date() },
+        paymentStatus: 'paid',
+        paymentIntentId: session.payment_intent,
+      },
+      { upsert: true }
+    );
+    // Send email to student
+    await transporter.sendMail({
+      from: `"CourseHub" <${process.env.EMAIL_USER}>`,
+      to: student.email,
+      subject: `Enrollment Confirmation: ${course.title}`,
+      html: `
+        <h2>Purchase Successful!</h2>
+        <p>Dear ${student.firstName} ${student.lastName},</p>
+        <p>You have successfully purchased and enrolled in <strong>${course.title}</strong> for $${course.price.toFixed(2)}.</p>
+        <p>Start learning now!</p>
+        <p>Best regards,<br>CourseHub Team</p>
+      `,
+    });
+    // Find instructor
+    const instructor = await User.findOne({ createdCourses: course_id });
+    if (instructor) {
       await transporter.sendMail({
         from: `"CourseHub" <${process.env.EMAIL_USER}>`,
-        to: student.email,
-        subject: `Enrollment Confirmation: ${course.title}`,
+        to: instructor.email,
+        subject: `New Enrollment in ${course.title}`,
         html: `
-          <h2>Purchase Successful!</h2>
-          <p>Dear ${student.firstName} ${student.lastName},</p>
-          <p>You have successfully purchased and enrolled in <strong>${course.title}</strong> for $${course.price.toFixed(2)}.</p>
-          <p>Start learning now!</p>
+          <h2>New Student Enrollment</h2>
+          <p>Dear ${instructor.firstName} ${instructor.lastName},</p>
+          <p>A student (${student.firstName} ${student.lastName}) has purchased and enrolled in your course <strong>${course.title}</strong> for $${course.price.toFixed(2)}.</p>
           <p>Best regards,<br>CourseHub Team</p>
         `,
       });
-
-      // Find instructor
-      const instructor = await User.findOne({ createdCourses: course_id });
-      if (instructor) {
-        await transporter.sendMail({
-          from: `"CourseHub" <${process.env.EMAIL_USER}>`,
-          to: instructor.email,
-          subject: `New Enrollment in ${course.title}`,
-          html: `
-            <h2>New Student Enrollment</h2>
-            <p>Dear ${instructor.firstName} ${instructor.lastName},</p>
-            <p>A student (${student.firstName} ${student.lastName}) has purchased and enrolled in your course <strong>${course.title}</strong> for $${course.price.toFixed(2)}.</p>
-            <p>Best regards,<br>CourseHub Team</p>
-          `,
-        });
-      }
     }
-
     res.json({ message: 'Enrollment confirmed' });
   } catch (error) {
     console.error('Purchase success error:', { message: error.message, stack: error.stack });
@@ -297,6 +291,7 @@ router.post('/create', authMiddleware(['Instructor']), upload.fields([
 
     const course = new Course({
       instructorName: `${user.firstName} ${user.lastName}`,
+      instructor: req.user.id,
       title,
       coverImage: coverImageUrl,
       category,
@@ -334,8 +329,13 @@ router.put('/:id', authMiddleware(['Instructor', 'Admin']), upload.fields([
       return res.status(404).json({ message: 'Course not found' });
     }
 
-    if (req.user.role === 'Instructor' && course.instructorName !== `${req.user.firstName} ${req.user.lastName}`) {
-      return res.status(403).json({ message: 'Unauthorized to update this course' });
+    if (req.user.role === 'Instructor') {
+      if (!course.instructor) {
+        return res.status(400).json({ message: 'Course instructor not set. Please contact admin to fix this course.' });
+      }
+      if (!course.instructor.equals(req.user.id)) {
+        return res.status(403).json({ message: 'Unauthorized to update this course' });
+      }
     }
 
     let coverImageUrl = course.coverImage;
@@ -407,8 +407,13 @@ router.delete('/:id', authMiddleware(['Instructor', 'Admin']), async (req, res) 
       return res.status(404).json({ message: 'Course not found' });
     }
 
-    if (req.user.role === 'Instructor' && course.instructorName !== `${req.user.firstName} ${req.user.lastName}`) {
-      return res.status(403).json({ message: 'Unauthorized to delete this course' });
+    if (req.user.role === 'Instructor') {
+      if (!course.instructor) {
+        return res.status(400).json({ message: 'Course instructor not set. Please contact admin to fix this course.' });
+      }
+      if (!course.instructor.equals(req.user.id)) {
+        return res.status(403).json({ message: 'Unauthorized to delete this course' });
+      }
     }
 
     if (course.coverImage) {

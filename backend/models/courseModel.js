@@ -18,6 +18,7 @@ const courseSchema = new mongoose.Schema({
   description: { type: String, required: true },
   sampleVideo: { type: String },
   createdAt: { type: Date, default: Date.now },
+  instructor: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 });
 
 module.exports = mongoose.model('Course', courseSchema);
