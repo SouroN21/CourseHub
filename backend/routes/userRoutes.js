@@ -21,7 +21,6 @@ router.post('/signup', async (req, res) => {
       role: ['Admin', 'Instructor', 'Student'].includes(role) ? role : 'Student',
       bio: role === 'Instructor' ? bio : undefined,
       earnings: role === 'Instructor' ? (earnings || 0) : undefined,
-      enrolledCourses: role === 'Student' ? [] : undefined,
     });
 
     await user.save();
@@ -63,7 +62,6 @@ router.post('/login', async (req, res) => {
         role: user.role,
         bio: user.bio,
         earnings: user.earnings,
-        enrolledCourses: user.enrolledCourses,
       },
     });
   } catch (error) {
@@ -107,7 +105,6 @@ router.put('/update', authMiddleware(['Admin', 'Instructor', 'Student']), async 
         role: user.role,
         bio: user.bio,
         earnings: user.earnings,
-        enrolledCourses: user.enrolledCourses,
       },
     });
   } catch (error) {
@@ -155,7 +152,7 @@ router.delete('/delete/:id', authMiddleware(['Admin']), async (req, res) => {
 // View Profile
 router.get('/profile', authMiddleware(['Admin', 'Instructor', 'Student']), async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password').populate('enrolledCourses', 'title image');
+    const user = await User.findById(req.user.id).select('-password');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -170,7 +167,6 @@ router.get('/profile', authMiddleware(['Admin', 'Instructor', 'Student']), async
         createdDate: user.createdDate,
         bio: user.bio,
         earnings: user.earnings,
-        enrolledCourses: user.enrolledCourses,
       },
     });
   } catch (error) {
