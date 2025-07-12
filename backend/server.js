@@ -7,6 +7,7 @@ const courseRoutes = require('./routes/courseRoutes');
 const enrollmentRoutes = require('./routes/enrollmentRoutes');
 const courseContentRoutes = require('./routes/courseContentRoutes');
 const quizSubmissionRoutes = require('./routes/quizSubmissionRoutes');
+const assignmentSubmissionRoutes = require('./routes/assignmentSubmissionRoutes');
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ app.use('/api/courses', courseRoutes); // Fixed: Added leading slash
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/course-content', courseContentRoutes);
 app.use('/api/quiz-submissions', quizSubmissionRoutes);
+app.use('/api/assignment-submissions', assignmentSubmissionRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

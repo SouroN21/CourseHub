@@ -2,6 +2,7 @@
   "dependencies": {
     "@headlessui/react": "^2.2.4",
     "bcrypt": "^6.0.0",
-    "mongoose": "^8.16.1"
+    "mongoose": "^8.16.1",
+    "multer": "^2.0.1"
   }
 }
