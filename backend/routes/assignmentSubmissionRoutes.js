@@ -3,10 +3,17 @@ const router = express.Router();
 const multer = require('multer');
 const AssignmentSubmission = require('../models/assignmentSubmissionModel');
 const auth = require('../middleware/auth');
+const { v2: cloudinary } = require('cloudinary');
 
-// Configure multer (local, can be replaced with cloudinary)
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Configure multer for temporary file storage before Cloudinary upload
+const upload = multer({ dest: 'uploads/' });
 
 // Student submits assignment
 router.post('/', auth(), upload.single('file'), async (req, res) => {
@@ -14,12 +21,18 @@ router.post('/', auth(), upload.single('file'), async (req, res) => {
     const { assignmentContentId, comments } = req.body;
     const student = req.user.id;
     let fileUrl = '';
+    
     if (req.file) {
-      // fileUrl = await uploadToCloudinary(req.file); // If using cloudinary
-      fileUrl = `uploads/${req.file.originalname}`; // Placeholder, replace with actual upload logic
+      // Upload file to Cloudinary
+      const uploadRes = await cloudinary.uploader.upload(req.file.path, { 
+        resource_type: 'auto',
+        folder: 'assignment-submissions'
+      });
+      fileUrl = uploadRes.secure_url;
     } else {
       return res.status(400).json({ message: 'File is required' });
     }
+    
     // Upsert: allow resubmission (overwrite previous)
     const submission = await AssignmentSubmission.findOneAndUpdate(
       { assignmentContentId, student },
