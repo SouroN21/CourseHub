@@ -8,6 +8,7 @@ const enrollmentRoutes = require('./routes/enrollmentRoutes');
 const courseContentRoutes = require('./routes/courseContentRoutes');
 const quizSubmissionRoutes = require('./routes/quizSubmissionRoutes');
 const assignmentSubmissionRoutes = require('./routes/assignmentSubmissionRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 
 dotenv.config();
 
@@ -27,6 +28,7 @@ app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/course-content', courseContentRoutes);
 app.use('/api/quiz-submissions', quizSubmissionRoutes);
 app.use('/api/assignment-submissions', assignmentSubmissionRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

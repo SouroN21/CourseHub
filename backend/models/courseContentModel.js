@@ -4,7 +4,7 @@ const courseContentSchema = new mongoose.Schema({
   course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
   type: {
     type: String,
-    enum: ['slide', 'video', 'document', 'live', 'assignment', 'quiz', 'notice', 'poll', 'survey'],
+    enum: ['slide', 'video', 'document', 'live', 'assignment', 'quiz', 'notice', 'poll', 'survey', 'finalExam'],
     required: true
   },
   title: { type: String, required: true },

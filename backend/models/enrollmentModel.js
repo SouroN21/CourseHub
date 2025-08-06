@@ -7,7 +7,11 @@ const enrollmentSchema = new mongoose.Schema({
   paymentStatus: { type: String, enum: ['free', 'paid', 'pending'], default: 'free' },
   paymentIntentId: { type: String },
   progress: { type: Number, default: 0 },
-  certificateIssued: { type: Boolean, default: false }
+  // Array of completed course content IDs for progress tracking
+  completedContent: [{ type: mongoose.Schema.Types.ObjectId, ref: 'CourseContent' }],
+  certificateIssued: { type: Boolean, default: false },
+  // URL to the issued certificate (if any)
+  certificateUrl: { type: String },
 });
 
 enrollmentSchema.index({ student: 1, course: 1 }, { unique: true });

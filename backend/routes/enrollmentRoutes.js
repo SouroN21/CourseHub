@@ -194,4 +194,41 @@ router.get('/analytics/course/:courseId', authMiddleware(['Instructor', 'Admin']
   }
 });
 
+// POST /api/enrollments/:courseId/complete/:contentId - Mark content as complete, update progress, and issue certificate
+router.post('/:courseId/complete/:contentId', authMiddleware(['Student']), async (req, res) => {
+  const { courseId, contentId } = req.params;
+  const userId = req.user.id;
+  try {
+    if (!mongoose.Types.ObjectId.isValid(courseId) || !mongoose.Types.ObjectId.isValid(contentId)) {
+      return res.status(400).json({ message: 'Invalid course or content ID' });
+    }
+    // Find enrollment
+    const enrollment = await Enrollment.findOne({ student: userId, course: courseId });
+    if (!enrollment) {
+      return res.status(404).json({ message: 'Enrollment not found' });
+    }
+    // Add contentId to completedContent if not already present
+    if (!enrollment.completedContent) enrollment.completedContent = [];
+    if (!enrollment.completedContent.map(id => id.toString()).includes(contentId)) {
+      enrollment.completedContent.push(contentId);
+    }
+    // Count total course contents
+    const CourseContent = require('../models/courseContentModel');
+    const totalContents = await CourseContent.countDocuments({ course: courseId });
+    // Update progress
+    enrollment.progress = totalContents > 0 ? Math.round((enrollment.completedContent.length / totalContents) * 100) : 0;
+    // Issue certificate if 100% complete
+    if (enrollment.progress === 100 && !enrollment.certificateIssued) {
+      enrollment.certificateIssued = true;
+      // Generate a certificate URL (placeholder, replace with real logic if needed)
+      enrollment.certificateUrl = `/certificates/${enrollment._id}.pdf`;
+    }
+    await enrollment.save();
+    res.json({ message: 'Progress updated', progress: enrollment.progress, certificateIssued: enrollment.certificateIssued, certificateUrl: enrollment.certificateUrl });
+  } catch (error) {
+    console.error('Mark content complete error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 module.exports = router; 
