@@ -7,30 +7,74 @@ const authMiddleware = require('../middleware/auth');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
+const { Readable } = require('stream');
 
-// Assume multer/cloudinary config is set up elsewhere
-const upload = multer({ dest: 'uploads/' });
+// Configure Cloudinary (make sure env vars are set)
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Use memoryStorage to avoid disk writes on serverless platforms
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// Helper to upload buffer to Cloudinary via stream
+function uploadBufferToCloudinary(buffer, folder = '') {
+  return new Promise((resolve, reject) => {
+    const readable = new Readable();
+    readable.push(buffer);
+    readable.push(null);
+
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: 'auto', folder },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+
+    readable.pipe(stream);
+  });
+}
 
 // Create content (Instructor only)
 router.post('/', authMiddleware(['Instructor']), upload.single('file'), async (req, res) => {
   try {
-    const { course, type, title, description, liveDate, dueDate, questions, noticeText, externalLink } = req.body;
+    const {
+      course,
+      type,
+      title,
+      description,
+      liveDate,
+      dueDate,
+      questions,
+      noticeText,
+      externalLink,
+      pollOptions,
+      surveyQuestions,
+    } = req.body;
+
     if (!mongoose.Types.ObjectId.isValid(course)) {
       return res.status(400).json({ message: 'Invalid course ID' });
     }
+
     // Check instructor owns the course
     const foundCourse = await Course.findById(course);
     if (!foundCourse || foundCourse.instructor.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
+
     let contentUrl = undefined;
     let assignmentFile = undefined;
+
     if (req.file) {
-      // Upload file to cloudinary
-      const uploadRes = await cloudinary.uploader.upload(req.file.path, { resource_type: 'auto' });
+      const uploadRes = await uploadBufferToCloudinary(req.file.buffer, 'course-contents');
       if (type === 'assignment') assignmentFile = uploadRes.secure_url;
       else contentUrl = uploadRes.secure_url;
     }
+
     const content = new CourseContent({
       course,
       type,
@@ -44,9 +88,10 @@ router.post('/', authMiddleware(['Instructor']), upload.single('file'), async (r
       assignmentFile,
       externalLink,
       createdBy: req.user.id,
-      pollOptions: req.body.pollOptions ? JSON.parse(req.body.pollOptions) : undefined,
-      surveyQuestions: req.body.surveyQuestions ? JSON.parse(req.body.surveyQuestions) : undefined
+      pollOptions: pollOptions ? JSON.parse(pollOptions) : undefined,
+      surveyQuestions: surveyQuestions ? JSON.parse(surveyQuestions) : undefined,
     });
+
     await content.save();
     res.status(201).json({ message: 'Content created', content });
   } catch (error) {
@@ -61,11 +106,12 @@ router.get('/course/:courseId', authMiddleware(['Instructor', 'Student', 'Admin'
     if (!mongoose.Types.ObjectId.isValid(courseId)) {
       return res.status(400).json({ message: 'Invalid course ID' });
     }
-    // If student, check enrollment
+
     if (req.user.role === 'Student') {
       const enrolled = await Enrollment.findOne({ student: req.user.id, course: courseId });
       if (!enrolled) return res.status(403).json({ message: 'Not enrolled' });
     }
+
     const contents = await CourseContent.find({ course: courseId }).sort({ createdAt: 1 });
     res.json({ contents });
   } catch (error) {
@@ -80,8 +126,10 @@ router.get('/:id', authMiddleware(['Instructor', 'Student', 'Admin']), async (re
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid content ID' });
     }
+
     const content = await CourseContent.findById(id);
     if (!content) return res.status(404).json({ message: 'Not found' });
+
     res.json({ content });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -92,30 +140,37 @@ router.get('/:id', authMiddleware(['Instructor', 'Student', 'Admin']), async (re
 router.put('/:id', authMiddleware(['Instructor']), upload.single('file'), async (req, res) => {
   try {
     const { id } = req.params;
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid content ID' });
     }
+
     const content = await CourseContent.findById(id);
     if (!content) return res.status(404).json({ message: 'Not found' });
+
     const course = await Course.findById(content.course);
     if (!course || course.instructor.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
+
     let contentUrl = content.contentUrl;
     let assignmentFile = content.assignmentFile;
+
     if (req.file) {
-      const uploadRes = await cloudinary.uploader.upload(req.file.path, { resource_type: 'auto' });
+      const uploadRes = await uploadBufferToCloudinary(req.file.buffer, 'course-contents');
       if (content.type === 'assignment') assignmentFile = uploadRes.secure_url;
       else contentUrl = uploadRes.secure_url;
     }
+
     const update = {
       ...req.body,
       contentUrl,
       assignmentFile,
       questions: req.body.questions ? JSON.parse(req.body.questions) : content.questions,
       pollOptions: req.body.pollOptions ? JSON.parse(req.body.pollOptions) : content.pollOptions,
-      surveyQuestions: req.body.surveyQuestions ? JSON.parse(req.body.surveyQuestions) : content.surveyQuestions
+      surveyQuestions: req.body.surveyQuestions ? JSON.parse(req.body.surveyQuestions) : content.surveyQuestions,
     };
+
     const updated = await CourseContent.findByIdAndUpdate(id, update, { new: true });
     res.json({ message: 'Content updated', content: updated });
   } catch (error) {
@@ -127,15 +182,19 @@ router.put('/:id', authMiddleware(['Instructor']), upload.single('file'), async 
 router.delete('/:id', authMiddleware(['Instructor']), async (req, res) => {
   try {
     const { id } = req.params;
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid content ID' });
     }
+
     const content = await CourseContent.findById(id);
     if (!content) return res.status(404).json({ message: 'Not found' });
+
     const course = await Course.findById(content.course);
     if (!course || course.instructor.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
+
     await CourseContent.findByIdAndDelete(id);
     res.json({ message: 'Content deleted' });
   } catch (error) {
@@ -143,4 +202,4 @@ router.delete('/:id', authMiddleware(['Instructor']), async (req, res) => {
   }
 });
 
-module.exports = router; 
+module.exports = router;
