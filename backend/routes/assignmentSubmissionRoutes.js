@@ -4,6 +4,7 @@ const multer = require('multer');
 const AssignmentSubmission = require('../models/assignmentSubmissionModel');
 const auth = require('../middleware/auth');
 const { v2: cloudinary } = require('cloudinary');
+const { Readable } = require('stream');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -12,33 +13,50 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Configure multer for temporary file storage before Cloudinary upload
-const upload = multer({ dest: 'uploads/' });
+// Use memory storage for multer to avoid disk writes
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// Helper to upload buffer to Cloudinary using stream
+function uploadBufferToCloudinary(buffer, folder = '') {
+  return new Promise((resolve, reject) => {
+    const readable = new Readable();
+    readable.push(buffer);
+    readable.push(null);
+
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: 'auto', folder },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+
+    readable.pipe(stream);
+  });
+}
 
 // Student submits assignment
 router.post('/', auth(), upload.single('file'), async (req, res) => {
   try {
     const { assignmentContentId, comments } = req.body;
     const student = req.user.id;
-    let fileUrl = '';
-    
-    if (req.file) {
-      // Upload file to Cloudinary
-      const uploadRes = await cloudinary.uploader.upload(req.file.path, { 
-        resource_type: 'auto',
-        folder: 'assignment-submissions'
-      });
-      fileUrl = uploadRes.secure_url;
-    } else {
+
+    if (!req.file) {
       return res.status(400).json({ message: 'File is required' });
     }
-    
+
+    // Upload buffer to Cloudinary
+    const uploadRes = await uploadBufferToCloudinary(req.file.buffer, 'assignment-submissions');
+    const fileUrl = uploadRes.secure_url;
+
     // Upsert: allow resubmission (overwrite previous)
     const submission = await AssignmentSubmission.findOneAndUpdate(
       { assignmentContentId, student },
       { fileUrl, comments, submittedAt: new Date() },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
     res.json({ submission });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -76,15 +94,17 @@ router.put('/:submissionId/grade', auth(['Instructor', 'Admin']), async (req, re
     const { grade, feedback } = req.body;
     const gradedBy = req.user.id;
     const gradedAt = new Date();
+
     const submission = await AssignmentSubmission.findByIdAndUpdate(
       submissionId,
       { grade, feedback, gradedBy, gradedAt },
       { new: true }
     );
+
     res.json({ submission });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-module.exports = router; 
+module.exports = router;
