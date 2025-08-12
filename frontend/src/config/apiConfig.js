@@ -1,5 +1,5 @@
 const API_CONFIG = {
-  BASE_URL: 'https://course-hub-back.vercel.app/',
+  BASE_URL: 'https://course-hub-back.vercel.app',
 };
 
 export default API_CONFIG;
