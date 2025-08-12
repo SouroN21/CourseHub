@@ -4,13 +4,13 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/userModel.js');
 const Course = require('../models/courseModel');
+const Enrollment = require('../models/enrollmentModel');
 const authMiddleware = require('../middleware/auth');
-const mongoose = require('mongoose'); // Add mongoose for ObjectId validation
+const mongoose = require('mongoose');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const nodemailer = require('nodemailer');
-const Enrollment = require('../models/enrollmentModel');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -28,13 +28,11 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Configure Multer for file uploads
+// Multer memory storage config for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: {
-    fileSize: 104857600, // 100MB max for videos
-  },
+  limits: { fileSize: 104857600 }, // 100MB max
   fileFilter: (req, file, cb) => {
     const allowedImageTypes = ['image/jpeg', 'image/png', 'image/jpg'];
     const allowedVideoTypes = ['video/mp4', 'video/webm'];
@@ -49,32 +47,51 @@ const upload = multer({
   },
 });
 
+// Helper: Upload buffer to Cloudinary (returns Promise)
+const uploadBufferToCloudinary = (buffer, resourceType, folder) =>
+  new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: resourceType, folder },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+
+// Helper: Extract Cloudinary public ID from URL (safe)
+const getCloudinaryPublicId = (url) => {
+  if (!url) return null;
+  try {
+    // Get last segment of URL path, remove extension and query string
+    const pathname = new URL(url).pathname; 
+    const filename = pathname.substring(pathname.lastIndexOf('/') + 1);
+    return filename.split('.')[0];
+  } catch {
+    return null;
+  }
+};
+
+// --- ROUTES ---
+
 // POST /api/courses/purchase/:id - Purchase or enroll in a course
 router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid course ID' });
-    }
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid course ID' });
+
     const course = await Course.findById(id);
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
+    if (!course) return res.status(404).json({ message: 'Course not found' });
 
     const student = await User.findById(req.user.id);
-    if (!student) {
-      return res.status(404).json({ message: 'Student not found' });
-    }
+    if (!student) return res.status(404).json({ message: 'Student not found' });
 
-    // Find instructor
     const instructor = await User.findOne({ createdCourses: course._id });
-    if (!instructor) {
-      return res.status(404).json({ message: 'Instructor not found' });
-    }
+    if (!instructor) return res.status(404).json({ message: 'Instructor not found' });
 
-    // Free course: Enroll directly
     if (course.price === 0) {
-      // Send email to student
+      // Free course: enroll directly & send emails
       await transporter.sendMail({
         from: `"CourseHub" <${process.env.EMAIL_USER}>`,
         to: student.email,
@@ -87,7 +104,6 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
           <p>Best regards,<br>CourseHub Team</p>
         `,
       });
-      // Send email to instructor
       await transporter.sendMail({
         from: `"CourseHub" <${process.env.EMAIL_USER}>`,
         to: instructor.email,
@@ -99,37 +115,30 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
           <p>Best regards,<br>CourseHub Team</p>
         `,
       });
+
       return res.json({ message: 'Enrolled successfully' });
     }
 
-    // Paid course: Create Stripe checkout session
+    // Paid course: create Stripe checkout session
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: course.title,
-              description: course.description,
-            },
-            unit_amount: Math.round(course.price * 100), // Convert to cents
-          },
-          quantity: 1,
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: { name: course.title, description: course.description },
+          unit_amount: Math.round(course.price * 100),
         },
-      ],
+        quantity: 1,
+      }],
       mode: 'payment',
       success_url: `http://localhost:3000/purchase-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `http://localhost:3000/courses/${course._id}`,
-      metadata: {
-        course_id: course._id.toString(),
-        student_id: student._id.toString(),
-      },
+      metadata: { course_id: course._id.toString(), student_id: student._id.toString() },
     });
 
     res.json({ url: session.url });
   } catch (error) {
-    console.error('Purchase course error:', { message: error.message, stack: error.stack });
+    console.error('Purchase course error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -139,26 +148,22 @@ router.post('/purchase-success', authMiddleware(['Student']), async (req, res) =
   const { sessionId } = req.body;
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId);
-    if (session.payment_status !== 'paid') {
-      return res.status(400).json({ message: 'Payment not completed.' });
-    }
+    if (session.payment_status !== 'paid') return res.status(400).json({ message: 'Payment not completed.' });
+
     const course_id = session.metadata.course_id;
     const student_id = session.metadata.student_id;
     if (!mongoose.Types.ObjectId.isValid(course_id) || !mongoose.Types.ObjectId.isValid(student_id)) {
       return res.status(400).json({ message: 'Invalid course or student ID' });
     }
+
     const course = await Course.findById(course_id);
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
+    if (!course) return res.status(404).json({ message: 'Course not found' });
+
     const student = await User.findById(student_id);
-    if (!student) {
-      return res.status(404).json({ message: 'Student not found' });
-    }
-    if (req.user.id !== student_id) {
-      return res.status(403).json({ message: 'Unauthorized' });
-    }
-    // Only enroll if not already enrolled
+    if (!student) return res.status(404).json({ message: 'Student not found' });
+
+    if (req.user.id !== student_id) return res.status(403).json({ message: 'Unauthorized' });
+
     await Enrollment.findOneAndUpdate(
       { student: student_id, course: course_id },
       {
@@ -168,7 +173,8 @@ router.post('/purchase-success', authMiddleware(['Student']), async (req, res) =
       },
       { upsert: true }
     );
-    // Send email to student
+
+    // Send emails
     await transporter.sendMail({
       from: `"CourseHub" <${process.env.EMAIL_USER}>`,
       to: student.email,
@@ -181,7 +187,7 @@ router.post('/purchase-success', authMiddleware(['Student']), async (req, res) =
         <p>Best regards,<br>CourseHub Team</p>
       `,
     });
-    // Find instructor
+
     const instructor = await User.findOne({ createdCourses: course_id });
     if (instructor) {
       await transporter.sendMail({
@@ -196,9 +202,10 @@ router.post('/purchase-success', authMiddleware(['Student']), async (req, res) =
         `,
       });
     }
+
     res.json({ message: 'Enrollment confirmed' });
   } catch (error) {
-    console.error('Purchase success error:', { message: error.message, stack: error.stack });
+    console.error('Purchase success error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -209,7 +216,7 @@ router.get('/', async (req, res) => {
     const courses = await Course.find().select('instructorName title coverImage category price level description sampleVideo createdAt');
     res.json({ courses });
   } catch (error) {
-    console.error('Get all courses error:', { message: error.message, stack: error.stack });
+    console.error('Get all courses error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -218,12 +225,10 @@ router.get('/', async (req, res) => {
 router.get('/created', authMiddleware(['Instructor']), async (req, res) => {
   try {
     const user = await User.findById(req.user.id).populate('createdCourses', 'instructorName title coverImage category price level description sampleVideo createdAt');
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({ courses: user.createdCourses });
   } catch (error) {
-    console.error('Created courses error:', { message: error.message, stack: error.stack });
+    console.error('Created courses error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -232,16 +237,12 @@ router.get('/created', authMiddleware(['Instructor']), async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid course ID' });
-    }
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid course ID' });
     const course = await Course.findById(id).select('instructorName title coverImage category price level description sampleVideo createdAt');
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
+    if (!course) return res.status(404).json({ message: 'Course not found' });
     res.json({ course });
   } catch (error) {
-    console.error('Get course error:', { message: error.message, stack: error.stack });
+    console.error('Get course error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -254,38 +255,18 @@ router.post('/create', authMiddleware(['Instructor']), upload.fields([
   const { title, category, price, level, description } = req.body;
   try {
     const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ message: 'User not found' });
 
     let coverImageUrl = '';
     let sampleVideoUrl = '';
 
-    if (req.files && req.files.coverImage) {
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { resource_type: 'image', folder: 'edaverse/courses/coverImages' },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.files.coverImage[0].buffer);
-      });
+    if (req.files?.coverImage?.[0]) {
+      const result = await uploadBufferToCloudinary(req.files.coverImage[0].buffer, 'image', 'edaverse/courses/coverImages');
       coverImageUrl = result.secure_url;
     }
 
-    if (req.files && req.files.sampleVideo) {
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { resource_type: 'video', folder: 'edaverse/courses/sampleVideos' },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.files.sampleVideo[0].buffer);
-      });
+    if (req.files?.sampleVideo?.[0]) {
+      const result = await uploadBufferToCloudinary(req.files.sampleVideo[0].buffer, 'video', 'edaverse/courses/sampleVideos');
       sampleVideoUrl = result.secure_url;
     }
 
@@ -308,7 +289,7 @@ router.post('/create', authMiddleware(['Instructor']), upload.fields([
 
     res.status(201).json({ message: 'Course created successfully', course });
   } catch (error) {
-    console.error('Create course error:', { message: error.message, stack: error.stack });
+    console.error('Create course error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -321,59 +302,44 @@ router.put('/:id', authMiddleware(['Instructor', 'Admin']), upload.fields([
   const { title, category, price, level, description } = req.body;
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid course ID' });
-    }
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid course ID' });
+
     const course = await Course.findById(id);
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
+    if (!course) return res.status(404).json({ message: 'Course not found' });
 
     if (req.user.role === 'Instructor') {
-      if (!course.instructor) {
-        return res.status(400).json({ message: 'Course instructor not set. Please contact admin to fix this course.' });
-      }
-      if (!course.instructor.equals(req.user.id)) {
-        return res.status(403).json({ message: 'Unauthorized to update this course' });
-      }
+      if (!course.instructor) return res.status(400).json({ message: 'Course instructor not set. Please contact admin.' });
+      if (!course.instructor.equals(req.user.id)) return res.status(403).json({ message: 'Unauthorized to update this course' });
     }
 
     let coverImageUrl = course.coverImage;
     let sampleVideoUrl = course.sampleVideo;
 
-    if (req.files && req.files.coverImage) {
-      if (course.coverImage) {
-        const publicId = course.coverImage.split('/').slice(-1)[0].split('.')[0];
-        await cloudinary.uploader.destroy(`edaverse/courses/coverImages/${publicId}`, { resource_type: 'image' });
+    // Delete old and upload new coverImage if provided
+    if (req.files?.coverImage?.[0]) {
+      const publicId = getCloudinaryPublicId(coverImageUrl);
+      if (publicId) {
+        try {
+          await cloudinary.uploader.destroy(`edaverse/courses/coverImages/${publicId}`, { resource_type: 'image' });
+        } catch (e) {
+          console.warn('Failed to delete old cover image:', e.message);
+        }
       }
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { resource_type: 'image', folder: 'edaverse/courses/coverImages' },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.files.coverImage[0].buffer);
-      });
+      const result = await uploadBufferToCloudinary(req.files.coverImage[0].buffer, 'image', 'edaverse/courses/coverImages');
       coverImageUrl = result.secure_url;
     }
 
-    if (req.files && req.files.sampleVideo) {
-      if (course.sampleVideo) {
-        const publicId = course.sampleVideo.split('/').slice(-1)[0].split('.')[0];
-        await cloudinary.uploader.destroy(`edaverse/courses/sampleVideos/${publicId}`, { resource_type: 'video' });
+    // Delete old and upload new sampleVideo if provided
+    if (req.files?.sampleVideo?.[0]) {
+      const publicId = getCloudinaryPublicId(sampleVideoUrl);
+      if (publicId) {
+        try {
+          await cloudinary.uploader.destroy(`edaverse/courses/sampleVideos/${publicId}`, { resource_type: 'video' });
+        } catch (e) {
+          console.warn('Failed to delete old sample video:', e.message);
+        }
       }
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { resource_type: 'video', folder: 'edaverse/courses/sampleVideos' },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.files.sampleVideo[0].buffer);
-      });
+      const result = await uploadBufferToCloudinary(req.files.sampleVideo[0].buffer, 'video', 'edaverse/courses/sampleVideos');
       sampleVideoUrl = result.secure_url;
     }
 
@@ -390,7 +356,7 @@ router.put('/:id', authMiddleware(['Instructor', 'Admin']), upload.fields([
 
     res.json({ message: 'Course updated successfully', course });
   } catch (error) {
-    console.error('Update course error:', { message: error.message, stack: error.stack });
+    console.error('Update course error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -399,30 +365,32 @@ router.put('/:id', authMiddleware(['Instructor', 'Admin']), upload.fields([
 router.delete('/:id', authMiddleware(['Instructor', 'Admin']), async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid course ID' });
-    }
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid course ID' });
+
     const course = await Course.findById(id);
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
+    if (!course) return res.status(404).json({ message: 'Course not found' });
 
     if (req.user.role === 'Instructor') {
-      if (!course.instructor) {
-        return res.status(400).json({ message: 'Course instructor not set. Please contact admin to fix this course.' });
-      }
-      if (!course.instructor.equals(req.user.id)) {
-        return res.status(403).json({ message: 'Unauthorized to delete this course' });
-      }
+      if (!course.instructor) return res.status(400).json({ message: 'Course instructor not set. Please contact admin.' });
+      if (!course.instructor.equals(req.user.id)) return res.status(403).json({ message: 'Unauthorized to delete this course' });
     }
 
-    if (course.coverImage) {
-      const publicId = course.coverImage.split('/').slice(-1)[0].split('.')[0];
-      await cloudinary.uploader.destroy(`edaverse/courses/coverImages/${publicId}`, { resource_type: 'image' });
+    // Delete images/videos from Cloudinary
+    const coverImagePublicId = getCloudinaryPublicId(course.coverImage);
+    if (coverImagePublicId) {
+      try {
+        await cloudinary.uploader.destroy(`edaverse/courses/coverImages/${coverImagePublicId}`, { resource_type: 'image' });
+      } catch (e) {
+        console.warn('Failed to delete cover image:', e.message);
+      }
     }
-    if (course.sampleVideo) {
-      const publicId = course.sampleVideo.split('/').slice(-1)[0].split('.')[0];
-      await cloudinary.uploader.destroy(`edaverse/courses/sampleVideos/${publicId}`, { resource_type: 'video' });
+    const sampleVideoPublicId = getCloudinaryPublicId(course.sampleVideo);
+    if (sampleVideoPublicId) {
+      try {
+        await cloudinary.uploader.destroy(`edaverse/courses/sampleVideos/${sampleVideoPublicId}`, { resource_type: 'video' });
+      } catch (e) {
+        console.warn('Failed to delete sample video:', e.message);
+      }
     }
 
     await Course.deleteOne({ _id: id });
@@ -434,7 +402,7 @@ router.delete('/:id', authMiddleware(['Instructor', 'Admin']), async (req, res) 
 
     res.json({ message: 'Course deleted successfully' });
   } catch (error) {
-    console.error('Delete course error:', { message: error.message, stack: error.stack });
+    console.error('Delete course error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
