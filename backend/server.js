@@ -30,6 +30,10 @@ app.use('/api/quiz-submissions', quizSubmissionRoutes);
 app.use('/api/assignment-submissions', assignmentSubmissionRoutes);
 app.use('/api/admin', adminRoutes);
 
+app.get('/', (req, res) => {
+    res.send('Hello');
+  });
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ message: 'Server is running' });
