@@ -131,8 +131,8 @@ router.post('/purchase/:id', authMiddleware(['Student']), async (req, res) => {
         quantity: 1,
       }],
       mode: 'payment',
-      success_url: `http://localhost:3000/purchase-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `http://localhost:3000/courses/${course._id}`,
+      success_url: `https://course-hub-front-green.vercel.app/purchase-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `https://course-hub-front-green.vercel.app/courses/${course._id}`,
       metadata: { course_id: course._id.toString(), student_id: student._id.toString() },
     });
 
